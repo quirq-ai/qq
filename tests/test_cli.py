@@ -52,3 +52,11 @@ def test_broken_plugin_is_skipped(monkeypatch, capsys):
     monkeypatch.setattr(cli, "entry_points", lambda group: [Broken()])
     assert cli.main([]) == 0
     assert "skipping subcommand 'broken'" in capsys.readouterr().err
+
+
+def test_sync_project_is_qqsync_s_and_bare_sync_is_unchanged(tmp_path, monkeypatch, capsys):
+    monkeypatch.chdir(tmp_path)
+    assert cli.main(["sync", "project", "check", "--root", str(tmp_path)]) == 0
+    assert capsys.readouterr().out.strip() == "no clones here"
+    assert cli.main(["sync"]) == 2   # the pins, as before: no manifest here
+    assert "no infra/repo.toml here" in capsys.readouterr().err
