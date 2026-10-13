@@ -50,7 +50,7 @@ jobs:
         side: [local, ci]
         include:
           - repo: xo-space
-            ref: c3cea98c8e70479b1f0cb8f871e28f8f6ee5a4f6  # TODO(expert): let rollers move these pins.
+            ref: 3bb8687307144ab604723e7c13f49753b22dc0e0  # TODO(expert): let rollers move these pins.
           - repo: innernet
             ref: da9b84cf811f4358e3ee0b5d9d4388b69bf481e9
     runs-on: ubuntu-24.04
