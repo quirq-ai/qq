@@ -105,6 +105,22 @@ A pin with `platforms` uses this machine's entry (`linux-x86_64`, `macos-arm64`,
 dropped from the manifest loses its link at the next sync. Registry packages must be public:
 `qq sync` asks for an anonymous token and never sends credentials.
 
+## Keep working clones up to date
+
+```sh
+qq sync project                  # fetch, then bring each clone up to date with its strategy
+qq sync project --fetch-only     # download new commits; leave the working files alone
+qq sync project check            # is each clone behind its remote? changes nothing
+qq sync project add URL [NAME]   # clone a repo; it needs no infra/repo.toml
+qq sync project members          # who has access to this clone's repo, and who is invited
+qq sync project invite USER      # give USER access
+qq sync project revoke USER      # remove USER's access, or cancel their invitation
+```
+
+A project is a clone someone edits, which follows a branch; the pins above are read-only copies at
+fixed commits. These commands are `qqsync project` from `sync`, under qq's `sync` word: see that
+repo's README for `--root`, `--json`, the exit codes and strategies.
+
 ## Build and test like CI
 
 ```sh

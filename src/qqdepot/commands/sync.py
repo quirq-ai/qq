@@ -2,6 +2,7 @@
 
     qq sync           in a repo: fetch every pin in infra/repo.toml and link it under .qq/
     qq fetch URL [DIR]  clone a repo, then qq sync in it
+    qq sync project ... keep working clones up to date and manage who has access (qqsync.project)
 
 Toolchains land at <repo>/.qq/toolchains/<name> and dependencies at <repo>/.qq/deps/<name>,
 each a link into the shared store (see store.py), so `qq build` and `qq test` find them.
@@ -19,6 +20,7 @@ from pathlib import Path
 
 from qqsync.errors import ManifestError
 from qqsync.manifest import load
+from qqsync.project import cli as project
 
 from qqdepot import store
 from qqdepot.commands.build import TOOLCHAINS, repo_root
@@ -153,6 +155,8 @@ def register(sub) -> None:
                        description="Fetch every pin in infra/repo.toml, check it against its digest,"
                                    " and link it under <repo>/.qq.")
     s.set_defaults(run=run_sync)
+    # The other kind of sync: clones someone edits, which follow a branch. Bare `qq sync` stays the pins.
+    project.register(s.add_subparsers(dest="sync_command", metavar="COMMAND"), prefix="qq")
     f = sub.add_parser("fetch", help="clone a repo, then qq sync in it")
     f.add_argument("url", help="the repo to clone")
     f.add_argument("directory", nargs="?", help="where to clone it (default: its name)")
