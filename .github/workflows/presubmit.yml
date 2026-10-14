@@ -77,7 +77,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
         with:
           repository: quirq-ai/sync
-          ref: 6fd1dd5b861cbbaa4a70337a6983e28ee7b07a6c  # the qqsync depot pins
+          ref: 9821f745690d5150cac70cd2eee54c97d431e6c3  # the qqsync depot pins
           path: .qq/sync
       - name: give the product its onboarding manifest
         run: |
