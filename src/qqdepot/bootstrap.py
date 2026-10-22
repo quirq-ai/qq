@@ -23,7 +23,7 @@ One update at a time (auto-update.lock); every interpreter it starts runs isolat
 """
 from __future__ import annotations
 
-import fcntl
+import errno
 import hashlib
 import io
 import os
@@ -43,11 +43,39 @@ from pathlib import Path
 _SKIP = shutil.ignore_patterns(".git", "build", "*.egg-info", "__pycache__")
 
 
+WINDOWS = os.name == "nt"
+
+
 def qq_home() -> Path:
+    # As pin.qq_home.
     if home := os.environ.get("QQ_HOME"):
         return Path(home)
+    if WINDOWS:
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "qq"
     cache = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
     return Path(cache) / "qq"
+
+
+# Copies of compat.lock (plus wait=False, for auto-update) and compat.venv_exe: this file runs
+# before qqdepot is installed.
+def _lock(file, wait: bool = True) -> None:
+    """Hold an exclusive lock on the open `file` until it is closed. With wait=False, raise
+    OSError at once when another process holds it."""
+    if WINDOWS:
+        import msvcrt
+        while True:
+            try:
+                msvcrt.locking(file.fileno(), msvcrt.LK_LOCK if wait else msvcrt.LK_NBLCK, 1)
+                return
+            except OSError as e:
+                if not wait or e.errno != errno.EDEADLOCK:
+                    raise
+    import fcntl
+    fcntl.flock(file, fcntl.LOCK_EX if wait else fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+
+def _venv_exe(env: Path, name: str) -> Path:
+    return env / "Scripts" / f"{name}.exe" if WINDOWS else env / "bin" / name
 
 
 def head(depot: Path) -> str | None:
@@ -78,13 +106,13 @@ def ensure_launcher(depot: Path) -> Path:
     key = hashlib.sha256(f"{depot}\0{commit or 'no-git'}".encode()).hexdigest()[:16]
     launchers = qq_home() / "launchers"
     target = launchers / key
-    qq = target / "bin" / "qq"
+    qq = _venv_exe(target, "qq")
     done = target / ".qq-installed"
     if done.is_file():
         return qq
     launchers.mkdir(parents=True, exist_ok=True)
     with (launchers / f".{key}.lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        _lock(lock)
         if done.is_file():
             return qq
         print(f"qq: setting up the launcher for {depot} in {target}", file=sys.stderr)
@@ -94,7 +122,7 @@ def ensure_launcher(depot: Path) -> Path:
                 src = export(depot, commit, Path(scratch))
                 subprocess.run([sys.executable, "-I", "-m", "venv", str(target)], check=True, cwd=launchers)
                 # As pin.pip_install: PyPI only by hash from the lock, the rest with no index.
-                pip = [str(target / "bin" / "python"), "-I", "-m", "pip", "--disable-pip-version-check", "--quiet"]
+                pip = [str(_venv_exe(target, "python")), "-I", "-m", "pip", "--disable-pip-version-check", "--quiet"]
                 lock = src / "src" / "qqdepot" / "locks" / "pypi.txt"
                 for cmd in ([*pip, "install", "--require-hashes", "--no-deps", "--only-binary=:all:", "-r", str(lock)],
                             [*pip, "install", "--no-index", "--no-build-isolation", str(src)],
@@ -235,8 +263,11 @@ def check() -> int:
 
 def _spawn(cmd: list[str]) -> None:
     """Start `cmd` detached from this terminal, with no input or output."""
+    # start_new_session has no effect on Windows: there the check gets its own process group and
+    # no console, so a Ctrl+C in this terminal does not stop it.
+    flags = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP if WINDOWS else 0
     subprocess.Popen(cmd, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                     close_fds=True, start_new_session=True, cwd=tools_dir())
+                     close_fds=True, start_new_session=True, cwd=tools_dir(), creationflags=flags)
 
 
 def _start_check(state: dict, depot: Path) -> None:
@@ -281,7 +312,8 @@ def _clean(depot: Path) -> bool:
 
 def _sync_commit() -> str | None:
     """The commit pip installed qqsync from, when it came from quirq-ai/sync by git; else None."""
-    for record in (tools_dir() / "qqsync").glob("lib/python*/site-packages/qqsync-*.dist-info/direct_url.json"):
+    pattern = "Lib/site-packages" if WINDOWS else "lib/python*/site-packages"
+    for record in (tools_dir() / "qqsync").glob(f"{pattern}/qqsync-*.dist-info/direct_url.json"):
         try:
             data = json.loads(record.read_text(encoding="utf-8"))
         except (OSError, ValueError):
@@ -312,7 +344,7 @@ def update(depot: Path, pins: dict, marker: dict) -> bool:
                     return False
             moved = True
         if pins["qqsync"] != marker["qqsync"] and _sync_commit() == marker["qqsync"]:
-            py = tools_dir() / "qqsync" / "bin" / "python"
+            py = _venv_exe(tools_dir() / "qqsync", "python")
             done = subprocess.run([str(py), "-I", "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
                                    "--force-reinstall", "--no-deps", f"qqsync @ git+{SYNC_REPO}@{pins['qqsync']}"],
                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
@@ -371,7 +403,7 @@ def auto_update(depot: Path, argv: list[str]) -> None:
                 and not (state.get("failed") == pins and time.time() - _number(state.get("failed_at")) < RETRY)):
             with (tools_dir() / "auto-update.lock").open("a") as lock:
                 try:
-                    fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    _lock(lock, wait=False)
                     now = _head(depot)
                 except OSError:
                     now = None  # another qq is updating: run this one
@@ -394,10 +426,16 @@ def auto_update(depot: Path, argv: list[str]) -> None:
                 else:
                     ok = False
             if ok:
-                qq = depot / "bin" / "qq"
                 sys.stdout.flush()
                 sys.stderr.flush()
-                os.execve(qq, [str(qq), *argv], {**os.environ, RAN_ENV: "1"})
+                env = {**os.environ, RAN_ENV: "1"}
+                if WINDOWS:
+                    # No exec (see main), and a .cmd run from here would need cmd's quoting: run the
+                    # new checkout's bootstrap as qq.cmd does, with this interpreter, and pass its code on.
+                    bootstrap = depot / "src" / "qqdepot" / "bootstrap.py"
+                    sys.exit(subprocess.run([sys.executable, "-I", str(bootstrap), str(depot), *argv], env=env).returncode)
+                qq = depot / "bin" / "qq"
+                os.execve(qq, [str(qq), *argv], env)
         if time.time() - _number(state.get("checked")) >= DAY:
             _start_check(state, depot)
     except Exception as e:  # noqa: BLE001 - auto-update never stops a command
@@ -416,6 +454,11 @@ def main(argv: list[str]) -> int:
         detail = detail.decode(errors="replace") if isinstance(detail, bytes) else detail or ""
         print(f"qq: cannot set up the launcher from {depot}: {e}\n{detail.strip()}".rstrip(), file=sys.stderr)
         return 1
+    if WINDOWS:   # no exec on Windows (see compat.replace_process): run it and pass its code on
+        try:
+            return subprocess.run([str(qq), *argv[1:]]).returncode
+        except KeyboardInterrupt:
+            return 130
     os.execv(qq, [str(qq), *argv[1:]])
     return 1  # not reached
 

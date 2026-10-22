@@ -10,7 +10,7 @@ import argparse
 import sys
 from importlib.metadata import entry_points
 
-from qqdepot import __version__
+from qqdepot import __version__, compat
 from qqdepot.commands import build, change, create, run, sync
 from qqdepot.pin import PinError, dispatch
 
@@ -18,6 +18,10 @@ from qqdepot.pin import PinError, dispatch
 # subcommand whose parser sets `run`, a function of the parsed args returning the exit code.
 COMMANDS_GROUP = "qq.commands"
 BUILTIN = (sync, build, change, run, create)
+# What runs on Windows so far: fetching pins and keeping clones current. build, test, run and a
+# repo's own commands need /bin/sh, which Windows lacks; upload, try, land and status are not
+# ported yet.
+WINDOWS_COMMANDS = frozenset({"sync", "fetch"})
 
 
 def build_parser(epilog: str | None = None) -> argparse.ArgumentParser:
@@ -58,6 +62,10 @@ def main(argv: list[str] | None = None) -> int:
                                                and route[0] not in build_parser().qq_commands)
         return run.QQ_FAILED if passthrough else 2
     route = argv[1:] if argv[:1] == ["--"] else argv   # qq -- NAME routes like qq -- sync
+    if compat.WINDOWS and route and not route[0].startswith("-") and route[0] not in WINDOWS_COMMANDS:
+        print(f"qq: `qq {route[0]}` does not run on Windows yet; only qq sync, qq fetch and qq sync "
+              "project do. Run it in WSL.", file=sys.stderr)
+        return 2
     if route[:1] == ["run"]:   # parsed on its own: its usage errors must not exit 2 like a command's
         return run.main(route[1:])
     parser = build_parser()

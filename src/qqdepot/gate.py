@@ -9,7 +9,6 @@ says so, because nothing defines what must pass there.
 """
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import re
@@ -19,6 +18,7 @@ import sys
 import tomllib
 from pathlib import Path
 
+from qqdepot import compat
 from qqdepot.backends import ChangeError
 from qqdepot.pin import git_env, pip_install, qq_home
 
@@ -72,12 +72,12 @@ def ensure() -> tuple[Path, Path]:
         return Path(os.environ[GATE_ENV]), Path(config)
     base = qq_home() / "gate"
     target = base / GATE_COMMIT[:16]
-    exe, config, done = target / "venv" / "bin" / "qqgate", target / "infra-config", target / ".qq-installed"
+    exe, config, done = compat.venv_exe(target / "venv", "qqgate"), target / "infra-config", target / ".qq-installed"
     if done.is_file():
         return exe, config
     base.mkdir(parents=True, exist_ok=True)
     with (base / f".{GATE_COMMIT[:16]}.lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        compat.lock(lock)
         if done.is_file():
             return exe, config
         print(f"qq: installing the gate at {GATE_COMMIT[:12]}", file=sys.stderr)
@@ -91,7 +91,7 @@ def ensure() -> tuple[Path, Path]:
             # Policy is read at the commit the gate pins, so qq and CI judge by the same config.
             _checkout(cfg_pin["source"], cfg_pin["commit"], config)
             for cmd in ([sys.executable, "-m", "venv", str(target / "venv")],
-                        *pip_install(target / "venv" / "bin" / "python", str(target / "gate"))):
+                        *pip_install(compat.venv_exe(target / "venv", "python"), str(target / "gate"))):
                 try:
                     subprocess.run(cmd, check=True, capture_output=True, text=True)
                 except subprocess.CalledProcessError as e:

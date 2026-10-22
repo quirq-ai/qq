@@ -1,0 +1,5 @@
+# Line endings that work on every platform whatever core.autocrlf says: the sh scripts keep LF
+# (sh cannot run CRLF) and the Windows launcher gets CRLF (cmd misreads labels and blocks in an
+# LF-only batch file).
+* text=auto eol=lf
+*.cmd text eol=crlf
