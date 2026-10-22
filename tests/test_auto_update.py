@@ -42,6 +42,7 @@ def setup_install(tmp_path, monkeypatch):
     b = git(upstream, "rev-parse", "HEAD")
     monkeypatch.setattr(bootstrap, "tools_dir", lambda: tools)
     monkeypatch.setattr(bootstrap, "QQ_REPO", str(upstream))
+    monkeypatch.setattr(bootstrap, "ALLOW_PROTOCOL", "file")
     (tools / "auto-update").write_text(json.dumps({"qq": a, "qqsync": S}))
     spawned, ran = [], []
     monkeypatch.setattr(bootstrap, "_spawn", spawned.append)
@@ -50,7 +51,8 @@ def setup_install(tmp_path, monkeypatch):
         ran.append((argv[1:], env.get(bootstrap.RAN_ENV)))
         raise Ran
     monkeypatch.setattr(bootstrap.os, "execve", execve)
-    return {"tools": tools, "depot": tools / "depot", "a": a, "b": b, "spawned": spawned, "ran": ran}
+    return {"tools": tools, "depot": tools / "depot", "a": a, "b": b, "spawned": spawned, "ran": ran,
+            "upstream": upstream}
 
 
 def state(t, **kw):
@@ -120,7 +122,7 @@ def test_a_failed_update_runs_this_qq_and_waits_an_hour(setup_install, capsys):
     bootstrap.auto_update(t["depot"], ["status"])
     assert capsys.readouterr().err == "", "no second try within the hour"
     assert bootstrap.head(t["depot"]) == t["a"] and not t["ran"]
-    assert "git fetch failed" in (t["tools"] / "auto-update.log").read_text()
+    assert "is not on quirq-ai/qq's main" in (t["tools"] / "auto-update.log").read_text()
 
 
 def test_a_broken_state_file_never_stops_a_command(setup_install):
@@ -187,3 +189,51 @@ def test_one_update_at_a_time(setup_install):
     with pytest.raises(Ran):
         bootstrap.auto_update(setup_install["depot"], ["status"])
     assert bootstrap.head(setup_install["depot"]) == setup_install["b"]
+
+
+def test_git_ignores_the_callers_git_environment(setup_install, monkeypatch, tmp_path):
+    """GIT_DIR and friends from the caller's shell must not point the update at another repo."""
+    t = setup_install
+    other = tmp_path / "other"
+    other.mkdir()
+    git(other, "init", "-q", "-b", "main")
+    (other / "x").write_text("x\n")
+    git(other, "add", "x")
+    git(other, "commit", "-q", "-m", "x")
+    mine = git(other, "rev-parse", "HEAD")
+    monkeypatch.setenv("GIT_DIR", str(other / ".git"))
+    monkeypatch.setenv("GIT_WORK_TREE", str(other))
+    monkeypatch.setenv("GIT_CONFIG_PARAMETERS", "'core.hooksPath'='/nonexistent'")
+    found(t)
+    with pytest.raises(Ran):
+        bootstrap.auto_update(t["depot"], ["status"])
+    monkeypatch.delenv("GIT_DIR")
+    monkeypatch.delenv("GIT_WORK_TREE")
+    assert git(t["depot"], "rev-parse", "HEAD") == t["b"]
+    assert git(other, "rev-parse", "HEAD") == mine and (other / "x").read_text() == "x\n"
+
+
+def test_a_pin_not_on_main_is_refused(setup_install):
+    t = setup_install
+    git(t["upstream"], "checkout", "-q", "-b", "side", t["a"])
+    (t["upstream"] / "f").write_text("side\n")
+    git(t["upstream"], "commit", "-q", "-am", "side")
+    side = git(t["upstream"], "rev-parse", "HEAD")
+    git(t["upstream"], "checkout", "-q", "main")
+    state(t, pins={"qq": side, "qqsync": S}, pins_at=time.time() + 5, checked=time.time())
+    bootstrap.auto_update(t["depot"], ["status"])
+    assert git(t["depot"], "rev-parse", "HEAD") == t["a"] and not t["ran"]
+    assert "is not on quirq-ai/qq's main" in (t["tools"] / "auto-update.log").read_text()
+
+
+def test_a_failed_qqsync_step_puts_qq_back(setup_install, monkeypatch):
+    t = setup_install
+    real = subprocess.run
+    monkeypatch.setattr(bootstrap.subprocess, "run", lambda cmd, **kw: real(cmd, **kw) if cmd[0] == "git" else
+                        subprocess.CompletedProcess(cmd, 1, "", "no network"))
+    monkeypatch.setattr(bootstrap, "_sync_commit", lambda: S)
+    state(t, pins={"qq": t["b"], "qqsync": "f" * 40}, pins_at=time.time() + 5, checked=time.time())
+    bootstrap.auto_update(t["depot"], ["status"])
+    assert git(t["depot"], "rev-parse", "HEAD") == t["a"], "back at the marker's commit"
+    assert json.loads((t["tools"] / "auto-update").read_text())["qq"] == t["a"]
+    assert not t["ran"] and "put qq back" in (t["tools"] / "auto-update.log").read_text()

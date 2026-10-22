@@ -92,14 +92,14 @@ def ensure_launcher(depot: Path) -> Path:
         try:
             with tempfile.TemporaryDirectory(dir=launchers, prefix=f".{key}.") as scratch:
                 src = export(depot, commit, Path(scratch))
-                subprocess.run([sys.executable, "-m", "venv", str(target)], check=True)
+                subprocess.run([sys.executable, "-I", "-m", "venv", str(target)], check=True, cwd=launchers)
                 # As pin.pip_install: PyPI only by hash from the lock, the rest with no index.
-                pip = [str(target / "bin" / "python"), "-m", "pip", "--disable-pip-version-check", "--quiet"]
+                pip = [str(target / "bin" / "python"), "-I", "-m", "pip", "--disable-pip-version-check", "--quiet"]
                 lock = src / "src" / "qqdepot" / "locks" / "pypi.txt"
                 for cmd in ([*pip, "install", "--require-hashes", "--no-deps", "--only-binary=:all:", "-r", str(lock)],
                             [*pip, "install", "--no-index", "--no-build-isolation", str(src)],
                             [*pip, "check"]):
-                    subprocess.run(cmd, check=True, capture_output=True)
+                    subprocess.run(cmd, check=True, capture_output=True, cwd=launchers)
         except BaseException:
             shutil.rmtree(target, ignore_errors=True)
             raise
@@ -249,9 +249,26 @@ def _start_check(state: dict, depot: Path) -> None:
         _log(f"could not start the check: {e}")
 
 
-def _git(depot: Path, *args: str, timeout: float = 120) -> subprocess.CompletedProcess:
+ALLOW_PROTOCOL = "https"  # the only transport auto-update's git may use (tests use file)
+
+
+def _git(depot: Path, *args: str, timeout: float = 30) -> subprocess.CompletedProcess:
+    """git on setup's checkout and nothing else: no GIT_* from the caller's environment (GIT_DIR,
+    GIT_WORK_TREE, GIT_CONFIG_PARAMETERS... would point it elsewhere or change its config), https
+    only, never a prompt, run from ~/qq-tools."""
+    env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
+    env.update(GIT_ALLOW_PROTOCOL=ALLOW_PROTOCOL, GIT_TERMINAL_PROMPT="0", GIT_CONFIG_NOSYSTEM="1")
     return subprocess.run(["git", "-C", str(depot), *args], stdin=subprocess.DEVNULL, capture_output=True,
-                          text=True, errors="replace", timeout=timeout)
+                          text=True, errors="replace", timeout=timeout, env=env, cwd=tools_dir())
+
+
+def _head(depot: Path) -> str | None:
+    try:
+        out = _git(depot, "rev-parse", "--verify", "HEAD")
+    except (OSError, subprocess.TimeoutExpired):
+        return None
+    commit = out.stdout.strip()
+    return commit if out.returncode == 0 and COMMIT.fullmatch(commit) else None
 
 
 def _clean(depot: Path) -> bool:
@@ -278,29 +295,57 @@ def _sync_commit() -> str | None:
 
 
 def update(depot: Path, pins: dict, marker: dict) -> bool:
-    """Move setup's checkout to the reviewed qq commit, and qqsync to its commit when it is still
-    setup's. Logged; False when a step failed (the checkout is left where it was then)."""
+    """Move setup's checkout to the reviewed qq commit (which must be on quirq-ai/qq's main), and
+    qqsync to its commit when it is still setup's. Logged. False when a step failed: the checkout is
+    then back at the marker's commit, or, if even that failed, the marker records where it is."""
+    moved = False
     try:
         if pins["qq"] != marker["qq"]:
-            for args in (("fetch", "--quiet", QQ_REPO, pins["qq"]), ("reset", "--quiet", "--keep", pins["qq"])):
-                done = _git(depot, *args)
+            for args in (("fetch", "--quiet", "--no-tags", QQ_REPO, "refs/heads/main"),
+                         ("merge-base", "--is-ancestor", pins["qq"], "FETCH_HEAD"),
+                         ("reset", "--quiet", "--keep", pins["qq"])):
+                done = _git(depot, *args, timeout=60)
                 if done.returncode:
-                    _log(f"update to qq {pins['qq']}: git {args[0]} failed\n{done.stderr.strip()[-2000:]}")
+                    why = ("is not on quirq-ai/qq's main" if args[0] == "merge-base"
+                           else f"git {args[0]} failed\n{done.stderr.strip()[-2000:]}")
+                    _log(f"update to qq {pins['qq']}: {why}")
                     return False
+            moved = True
         if pins["qqsync"] != marker["qqsync"] and _sync_commit() == marker["qqsync"]:
             py = tools_dir() / "qqsync" / "bin" / "python"
             done = subprocess.run([str(py), "-I", "-m", "pip", "install", "--quiet", "--disable-pip-version-check",
                                    "--force-reinstall", "--no-deps", f"qqsync @ git+{SYNC_REPO}@{pins['qqsync']}"],
                                   stdin=subprocess.DEVNULL, capture_output=True, text=True, errors="replace",
-                                  timeout=300, cwd=tools_dir())
+                                  timeout=120, cwd=tools_dir())
             if done.returncode:
                 _log(f"update to qqsync {pins['qqsync']}: failed\n{done.stderr.strip()[-2000:]}")
+                _undo(depot, marker, pins, moved)
                 return False
     except (OSError, subprocess.TimeoutExpired) as e:
         _log(f"update failed: {e}")
+        _undo(depot, marker, pins, moved)
         return False
     _log(f"update to qq {pins['qq']}, qqsync {pins['qqsync']}: done")
     return True
+
+
+def _undo(depot: Path, marker: dict, pins: dict, moved: bool) -> None:
+    """After a failed qqsync step: put the checkout back at the marker's commit, so auto-update still
+    owns it and tries again; if that fails too, record in the marker where the checkout is."""
+    if not moved:
+        return
+    try:
+        back = _git(depot, "reset", "--quiet", "--keep", marker["qq"]).returncode == 0
+    except (OSError, subprocess.TimeoutExpired):
+        back = False
+    if back:
+        _log(f"put qq back at {marker['qq']}")
+        return
+    try:
+        _write(tools_dir() / "auto-update", json.dumps({"qq": pins["qq"], "qqsync": marker["qqsync"]}) + "\n")
+        _log(f"qq stays at {pins['qq']}; qqsync is still {marker['qqsync']}")
+    except OSError as e:
+        _log(f"could not record qq at {pins['qq']} in the marker: {e}")
 
 
 def auto_update(depot: Path, argv: list[str]) -> None:
@@ -313,7 +358,7 @@ def auto_update(depot: Path, argv: list[str]) -> None:
         return
     marker, written = found
     try:
-        if depot.resolve() != (tools_dir() / "depot").resolve() or head(depot) != marker["qq"] or not _clean(depot):
+        if depot.resolve() != (tools_dir() / "depot").resolve() or _head(depot) != marker["qq"] or not _clean(depot):
             return  # not setup's checkout, or changed since setup: leave it until setup's Update
         state = _state()
         pins = state.get("pins")
@@ -327,14 +372,14 @@ def auto_update(depot: Path, argv: list[str]) -> None:
             with (tools_dir() / "auto-update.lock").open("a") as lock:
                 try:
                     fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
-                    now = head(depot)
+                    now = _head(depot)
                 except OSError:
                     now = None  # another qq is updating: run this one
                 if now == pins["qq"] and pins["qq"] != marker["qq"]:
                     ok = True  # another qq updated it since this one started
                 elif now == marker["qq"] and _clean(depot):
-                    print(f"qq: updating to {pins['qq'][:7]}, setup's newest reviewed qq (auto-update is on)",
-                          file=sys.stderr)
+                    print(f"qq: updating to {pins['qq'][:7]}, setup's newest reviewed qq (auto-update is on; "
+                          "this can take a minute)", file=sys.stderr, flush=True)
                     ok = update(depot, pins, marker)
                     state = _state()
                     if ok:
