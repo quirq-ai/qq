@@ -433,7 +433,12 @@ def auto_update(depot: Path, argv: list[str]) -> None:
                     # No exec (see main), and a .cmd run from here would need cmd's quoting: run the
                     # new checkout's bootstrap as qq.cmd does, with this interpreter, and pass its code on.
                     bootstrap = depot / "src" / "qqdepot" / "bootstrap.py"
-                    sys.exit(subprocess.run([sys.executable, "-I", str(bootstrap), str(depot), *argv], env=env).returncode)
+                    try:
+                        code = subprocess.run([sys.executable, "-I", str(bootstrap), str(depot), *argv],
+                                              env=env).returncode
+                    except KeyboardInterrupt:
+                        code = 130
+                    sys.exit(code)
                 qq = depot / "bin" / "qq"
                 os.execve(qq, [str(qq), *argv], env)
         if time.time() - _number(state.get("checked")) >= DAY:
