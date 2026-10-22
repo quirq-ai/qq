@@ -18,8 +18,9 @@ done
 depot=$(cd "$(dirname "$self")/.." && pwd -P)
 
 interpreter=${QQ_PYTHON:-python3}
-if ! "$interpreter" -c 'import sys, venv; sys.exit(sys.version_info < (3, 11, 4))' 2>/dev/null; then
+if ! "$interpreter" -I -c 'import sys, venv; sys.exit(sys.version_info < (3, 11, 4))' 2>/dev/null; then
   echo "qq: needs $interpreter 3.11.4 or newer with its venv module (set QQ_PYTHON to use another)." >&2
   exit 1
 fi
-exec "$interpreter" "$depot/src/qqdepot/bootstrap.py" "$depot" "$@"
+# -I: nothing in the folder qq is run from, nor PYTHONPATH, is imported by the bootstrap.
+exec "$interpreter" -I "$depot/src/qqdepot/bootstrap.py" "$depot" "$@"

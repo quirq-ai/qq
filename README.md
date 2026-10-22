@@ -77,8 +77,18 @@ requirements. pip still reads your own `PIP_*` variables and pip config (proxy, 
 | `QQ_DEPOT_URL` | Where version tags are fetched from (default this repo; a mirror works) |
 | `QQ_PINNED=1` | Run this `qq` as is, without reading the pin (applies to that one process) |
 
-TODO(expert): once qq publishes releases (release repo), pin by `sha256` archive by default and
-let the bootstrap update its own checkout.
+TODO(expert): once qq publishes releases (release repo), pin by `sha256` archive by default.
+
+**Auto-update** (off unless [qq-setup](https://github.com/quirq-ai/setup) turned it on): setup's
+option writes `~/qq-tools/auto-update`, naming the qq and qqsync commits it installed. Then the
+bootstrap keeps setup's own checkout (`~/qq-tools/depot`) at setup's reviewed commits (`pins.json` on
+setup's `main`). At most once a day a background check records them, so no command waits on the
+network; when it found newer ones, the next `qq` first moves the checkout (`git fetch`, then
+`reset --keep`), reinstalls qqsync if it is still the one setup installed, and runs the command on
+the new qq. A checkout with local changes or another commit, any other checkout, and a qqsync
+installed another way are never touched; nothing runs when `CI` or `QQ_PINNED` is set. "Newest" is
+whatever setup's `main` says, so a reverted pin is followed back. What it did is in
+`~/qq-tools/auto-update.log`. Inside a repo with a `[qq]` pin, that pin still decides which qq runs.
 
 ## Get a repo's toolchains and dependencies
 
