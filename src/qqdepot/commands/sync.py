@@ -22,7 +22,7 @@ from qqsync.errors import ManifestError
 from qqsync.manifest import load
 from qqsync.project import cli as project
 
-from qqdepot import store
+from qqdepot import compat, store
 from qqdepot.commands.build import TOOLCHAINS, repo_root
 from qqdepot.pin import MANIFEST, git_env
 
@@ -41,7 +41,7 @@ def _real_dir(root: Path, rel: Path) -> Path:
     path = root
     for part in rel.parts:
         path = path / part
-        if path.is_symlink():
+        if compat.is_link(path):
             raise store.FetchError(f"{path} is a symlink; qq sync writes only inside the repo. "
                                    "Remove it (and any committed .qq) and run qq sync again")
         if not path.exists():
@@ -58,21 +58,19 @@ STORE_ENTRY = re.compile(r"[a-z0-9]+-[0-9a-f]{16,}")   # store.py's <algo>-<hex>
 
 def _ours(link: Path) -> bool:
     """True for a link qq sync made: one into a store entry, under any QQ_HOME (it may change)."""
-    if not link.is_symlink():
+    if not compat.is_link(link):
         return False
-    target = Path(os.readlink(link))
+    target = compat.read_link(link)
     return target.parent.name == "store" and STORE_ENTRY.fullmatch(target.name) is not None
 
 
 def _link(target: Path, link: Path) -> None:
-    """Point `link` at `target`, replacing what was there in one step. `link.parent` must be a
-    directory _real_dir returned."""
-    if link.exists() and not link.is_symlink():
+    """Point `link` at `target`, replacing what was there (in one step except on Windows, where
+    the link is a junction; see compat.link_dir). `link.parent` must be a directory _real_dir
+    returned."""
+    if link.exists() and not compat.is_link(link):
         raise store.FetchError(f"{link} is not a link qq made; move it away and run qq sync again")
-    tmp = link.with_name(f".{link.name}.{os.getpid()}.tmp")
-    tmp.unlink(missing_ok=True)
-    tmp.symlink_to(target, target_is_directory=True)
-    os.replace(tmp, link)
+    compat.link_dir(target, link)
 
 
 def sync(root: Path) -> list[dict]:
@@ -89,12 +87,12 @@ def sync(root: Path) -> list[dict]:
             print(f"{base / name}: {artifact.digest[:19]}…")
         # A pin dropped from the manifest must not linger and be built with.
         # Only links qq made (into the store) are removed, so nothing else is ever deleted.
-        if (root / base).exists() or (root / base).is_symlink():
+        if (root / base).exists() or compat.is_link(root / base):
             for stale in _real_dir(root, base).iterdir():
                 if stale.name not in pins and not stale.name.startswith(".") and _ours(stale):
                     stale.unlink()
     record = _real_dir(root, RECORD.parent) / RECORD.name
-    if record.is_symlink():
+    if compat.is_link(record):
         raise store.FetchError(f"{record} is a symlink; remove it and run qq sync again")
     # A new file renamed over the record: writing in place would go through a hard link
     # (a tarball or a local tool can make one) to a file outside the repo.
@@ -103,7 +101,7 @@ def sync(root: Path) -> list[dict]:
         with os.fdopen(fd, "w") as out:
             out.write(json.dumps(synced, indent=2) + "\n")
         os.chmod(tmp, 0o666 & ~_umask())
-        os.replace(tmp, record)
+        compat.move(Path(tmp), record)
     except BaseException:
         Path(tmp).unlink(missing_ok=True)
         raise

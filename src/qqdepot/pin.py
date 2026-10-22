@@ -21,7 +21,6 @@ bump __version__ with each release so a version names one commit.
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import json
 import os
@@ -37,7 +36,7 @@ from pathlib import Path
 from qqsync.errors import ManifestError
 from qqsync.manifest import load
 
-from qqdepot import __version__
+from qqdepot import __version__, compat
 
 MANIFEST = Path("infra/repo.toml")
 # Set in the environment of a pinned qq, so it runs instead of dispatching again.
@@ -68,6 +67,8 @@ class Pin:
 def qq_home() -> Path:
     if home := os.environ.get("QQ_HOME"):
         return Path(home).resolve()   # links into the store must not depend on the cwd
+    if compat.WINDOWS:
+        return Path(os.environ.get("LOCALAPPDATA") or Path.home() / "AppData" / "Local") / "qq"
     cache = os.environ.get("XDG_CACHE_HOME") or Path.home() / ".cache"
     return Path(cache) / "qq"
 
@@ -228,7 +229,7 @@ def _published(source: str, commit: str) -> None:
 
 def installed_commit(target: Path) -> str | None:
     """The commit pip installed qqdepot from, from its PEP 610 direct_url.json, if a git one."""
-    for record in target.glob("lib/python*/site-packages/qqdepot-*.dist-info/direct_url.json"):
+    for record in (r for site in compat.site_packages(target) for r in site.glob("qqdepot-*.dist-info/direct_url.json")):
         try:
             return json.loads(record.read_text()).get("vcs_info", {}).get("commit_id")
         except (OSError, ValueError, AttributeError):
@@ -248,7 +249,7 @@ def ensure(pin: Pin) -> Path:
     check(pin)
     versions = qq_home() / "versions"
     target = versions / pin.key
-    qq = target / "bin" / "qq"
+    qq = compat.venv_exe(target, "qq")
     done = target / ".qq-installed"  # written last: a half-made environment is never used
     if done.is_file():
         return qq
@@ -256,15 +257,15 @@ def ensure(pin: Pin) -> Path:
     # Environments cannot move once made, so build in place under a lock that keeps
     # concurrent qq runs from building the same version twice.
     with (versions / f".{pin.key}.lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        compat.lock(lock)
         if done.is_file():
             return qq
         print(f"qq: installing qq {pin.version} pinned by {pin.manifest}", file=sys.stderr)
-        shutil.rmtree(target, ignore_errors=True)
+        compat.rmtree(target)
         try:
             with tempfile.TemporaryDirectory(dir=versions, prefix=f".{pin.key}.") as scratch:
                 _run([sys.executable, "-m", "venv", str(target)])
-                for cmd in pip_install(target / "bin" / "python", requirement(pin, Path(scratch))):
+                for cmd in pip_install(compat.venv_exe(target, "python"), requirement(pin, Path(scratch))):
                     _run(cmd)
             got = installed_version(qq)
             if got != pin.version:
@@ -273,7 +274,7 @@ def ensure(pin: Pin) -> Path:
             if algo == "git" and (commit := installed_commit(target)) != value:
                 raise PinError(f"{pin.manifest} pins qq at {value}, but pip installed {commit or 'an unknown commit'}")
         except BaseException:
-            shutil.rmtree(target, ignore_errors=True)
+            compat.rmtree(target)
             raise
         done.write_text(f"{pin.version} {pin.source or ''} {pin.digest or ''}\n")
     return qq
@@ -291,4 +292,4 @@ def dispatch(argv: list[str]) -> None:
     qq = ensure(pin)
     env = {**os.environ, PINNED_ENV: "1"}
     env.pop("PYTHONPATH", None)  # the pinned qq runs its own code, never code shadowing it
-    os.execve(qq, [str(qq), *argv], env)
+    compat.replace_process(qq, [str(qq), *argv], env)

@@ -35,6 +35,66 @@ jobs:
           .qq/gate-venv/bin/pip install --quiet -e .qq/gate
           .qq/gate-venv/bin/qqgate guard --repo qq --github .
 
+  # qq sync on macOS and native Windows: the portable tests (links into the store, sealing,
+  # refusal of mismatched bytes, junctions on Windows) and the launcher each platform starts qq
+  # with (bin/qq, bin/qq.cmd), from a fresh QQ_HOME.
+  portable:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, windows-2025]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97  # v7.0.0
+        with:
+          python-version: "3.14"
+      - run: python -m pip install --quiet -e ".[test]"
+      - run: python -m pytest -q -p no:cacheprovider tests/test_portable.py
+      - name: the launcher starts qq (macOS)
+        if: runner.os == 'macOS'
+        env:
+          QQ_HOME: ${{ runner.temp }}/qq
+        run: test "$(bin/qq --version)" = "qq $(python -c 'import qqdepot; print(qqdepot.__version__)')"
+      - name: the launcher starts qq (Windows cmd)
+        if: runner.os == 'Windows'
+        shell: cmd
+        env:
+          QQ_HOME: ${{ runner.temp }}\qq
+          QQ_PYTHON: python   # setup-python's; without it qq.cmd tries `py -3.14` first
+        run: |
+          call bin\qq.cmd --version > "%RUNNER_TEMP%\version.txt" || exit /b 1
+          type "%RUNNER_TEMP%\version.txt"
+          findstr /b /c:"qq " "%RUNNER_TEMP%\version.txt" || exit /b 1
+          call bin\qq.cmd build 2> "%RUNNER_TEMP%\build.txt"
+          if not errorlevel 2 exit /b 1
+          findstr /c:"does not run on Windows yet" "%RUNNER_TEMP%\build.txt" || exit /b 1
+      # The default path: no QQ_PYTHON, so qq.cmd starts qq with `py -3.14` (setup-python
+      # registers 3.14 with the py launcher).
+      - name: the launcher starts qq with its default Python (Windows cmd)
+        if: runner.os == 'Windows'
+        shell: cmd
+        env:
+          QQ_HOME: ${{ runner.temp }}\qq-default
+        run: |
+          set QQ_PYTHON=
+          call bin\qq.cmd --version || exit /b 1
+      # The fallback: with no py launcher on PATH, qq.cmd takes setup-python's `python`.
+      - name: the launcher falls back to python on PATH (Windows cmd)
+        if: runner.os == 'Windows'
+        shell: cmd
+        env:
+          QQ_HOME: ${{ runner.temp }}\qq-fallback
+        run: |
+          set QQ_PYTHON=
+          for %%I in (python.exe) do set "pydir=%%~dp$PATH:I"
+          set "PATH=%pydir%;%SystemRoot%\System32"
+          where py >nul 2>nul && exit /b 1
+          call bin\qq.cmd --version || exit /b 1
+
   # Limits: both runners share paths and user, and a red run fails before the compare, so
   # parity is shown for green runs; innernet's results are one case per action (no test suite).
   # V0-DEP-03 done-when on the real product repos: `qq test` (what a contributor runs) and

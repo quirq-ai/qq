@@ -14,7 +14,9 @@ tarball, and never changed after: the entry is made read only, its tree (paths, 
 times, link targets) is recorded in TREE_RECORD inside it, and every reuse checks the tree
 again, so a toolchain something wrote into (a build, a package manager) is refused instead of
 shared. Remove a refused entry with
-`chmod -R u+w ENTRY && rm -rf ENTRY`; the next qq sync fetches it again.
+`chmod -R u+w ENTRY && rm -rf ENTRY` (on Windows, in cmd: `attrib -r ENTRY\\* /s /d` then
+`rmdir /s /q ENTRY`);
+the next qq sync fetches it again.
 
 Pins are resolved, fetched (https, file, oci) and verified (every scheme, git checkouts included)
 by qqsync.pins, so depot only adds the git checkout and unpacking.
@@ -24,13 +26,13 @@ writes, not someone who rewrites both with the user's own rights.
 """
 from __future__ import annotations
 
-import fcntl
 import hashlib
 import os
 import posixpath
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import tempfile
 import urllib.parse
@@ -39,6 +41,7 @@ from pathlib import Path
 
 from qqsync import pins
 
+from qqdepot import compat
 from qqdepot.pin import git_env, qq_home
 
 
@@ -84,7 +87,7 @@ def ensure(artifact: Artifact) -> Path:
     store.mkdir(parents=True, exist_ok=True)
     # One qq at a time fetches, replaces or removes an entry; the others wait and reuse it.
     with (store / f".{entry.name[:40]}.lock").open("w") as lock:
-        fcntl.flock(lock, fcntl.LOCK_EX)
+        compat.lock(lock)
         if _usable(entry):
             return entry
         if entry.is_dir() and not entry.is_symlink():
@@ -104,7 +107,7 @@ def ensure(artifact: Artifact) -> Path:
                 _seal(staged, artifact)
                 # A directory moves to a new parent only while writable (its ".." changes),
                 # so the top is made read only once it is in place.
-                staged.rename(entry)
+                compat.move(staged, entry)
                 entry.chmod(entry.stat().st_mode & ~0o222)
             except OSError as e:
                 _unseal(scratch)   # so the scratch directory can be removed without root
@@ -113,6 +116,22 @@ def ensure(artifact: Artifact) -> Path:
 
 
 TREE_RECORD = ".qq-tree"
+FOLD_CASE: bool | None = None   # None: ask the file system the store is on (tests set it)
+
+
+def _folds_case(directory: Path) -> bool:
+    """Whether names that differ only in case are one file in `directory`. macOS and Windows
+    usually fold case, but a volume can be made case sensitive; Linux is taken not to."""
+    if FOLD_CASE is not None:
+        return FOLD_CASE
+    if not (compat.WINDOWS or sys.platform == "darwin"):
+        return False
+    fd, probe = tempfile.mkstemp(dir=directory, prefix=".qq-case-")
+    os.close(fd)
+    try:
+        return (directory / Path(probe).name.upper()).exists()
+    finally:
+        os.unlink(probe)
 
 
 def _tree(root: Path, content: bool = False) -> str:
@@ -198,8 +217,15 @@ def _usable(entry: Path) -> bool:
         raise FetchError(f"cannot check {entry}: {e}") from None
     if not same:
         raise FetchError(f"{entry} changed after qq fetched it, so it is not shared any more; "
-                         f"remove it (chmod -R u+w {entry} && rm -rf {entry}) and run qq sync again")
+                         f"remove it ({_remove_command(entry)}) and run qq sync again")
     return True
+
+
+def _remove_command(entry: Path) -> str:
+    """The shell command that deletes a sealed entry on this platform."""
+    if compat.WINDOWS:
+        return f'in cmd: attrib -r "{entry}\\*" /s /d && rmdir /s /q "{entry}"'
+    return f"chmod -R u+w {entry} && rm -rf {entry}"
 
 
 def _remove(entry: Path, store: Path) -> None:
@@ -207,12 +233,12 @@ def _remove(entry: Path, store: Path) -> None:
     aside = Path(tempfile.mkdtemp(dir=store, prefix=f".old-{entry.name[:24]}."))
     try:
         entry.chmod(0o700)   # moving a directory to a new parent rewrites its ".."
-        entry.rename(aside / "entry")
+        compat.move(entry, aside / "entry")
         _unseal(aside)
     except OSError as e:
         raise FetchError(f"cannot replace {entry}, made by an older qq: {e}; remove it and run qq sync again") from None
     finally:
-        shutil.rmtree(aside, ignore_errors=True)
+        compat.rmtree(aside)
 
 
 def _fetch_blob(artifact: Artifact, path: Path) -> Path:
@@ -227,7 +253,7 @@ def _fetch_blob(artifact: Artifact, path: Path) -> Path:
     return path
 
 
-def _check_members(archive: tarfile.TarFile, artifact: Artifact) -> None:
+def _check_members(archive: tarfile.TarFile, artifact: Artifact, fold: bool | None = None) -> None:
     """Containment that does not rest on the interpreter's own tarfile: its "data" filter had
     bypasses until 3.11.13, 3.12.11 and 3.13.4 (symlink chains), and qq runs on older system
     interpreters too.
@@ -241,34 +267,37 @@ def _check_members(archive: tarfile.TarFile, artifact: Artifact) -> None:
         norm = posixpath.normpath(path)
         return not (norm == ".." or norm.startswith("../") or posixpath.isabs(norm))
 
+    # Where the file system ignores case (macOS and Windows by default), "Bin/x" lands in "bin/x",
+    # so names are compared case-folded there.
+    key = str.casefold if (FOLD_CASE if fold is None else fold) else str
     links, files = {}, set()
     for m in archive.getmembers():
         if posixpath.isabs(m.name) or ".." in m.name.split("/") or not inside(m.name):
             raise FetchError(f"{artifact.name}: archive member {m.name!r} leaves the archive")
         name = posixpath.normpath(m.name)
-        if name in links or name in files:   # a later member would replace what was checked
+        if key(name) in links or key(name) in files:   # a later member would replace what was checked
             raise FetchError(f"{artifact.name}: archive member {m.name!r} appears twice")
         parts = name.split("/")
-        if any("/".join(parts[:i]) in links for i in range(1, len(parts))):
+        if any(key("/".join(parts[:i])) in links for i in range(1, len(parts))):
             raise FetchError(f"{artifact.name}: archive member {m.name!r} sits under a symlink")
         if m.issym():
             # Both readings must stay inside: the kernel's (resolved through the archive's links,
             # below) and the text's, since some tarfile filters rewrite targets lexically.
             if not inside(posixpath.join(posixpath.dirname(name), m.linkname)):
                 raise FetchError(f"{artifact.name}: symlink {m.name!r} points outside the archive")
-            links[name] = m.linkname
+            links[key(name)] = m.linkname
         elif m.islnk():
             # tarfile links to the target path as written, so ".." through a symlink would count.
-            if ".." in m.linkname.split("/") or posixpath.normpath(m.linkname) not in files:
+            if ".." in m.linkname.split("/") or key(posixpath.normpath(m.linkname)) not in files:
                 raise FetchError(f"{artifact.name}: hard link {m.name!r} does not name a file before it")
         elif m.isfile():
-            files.add(name)
+            files.add(key(name))
     for name in links:
-        if _escapes(name, links):
+        if _escapes(name, links, key):
             raise FetchError(f"{artifact.name}: symlink {name!r} points outside the archive")
 
 
-def _escapes(name: str, links: dict[str, str]) -> bool:
+def _escapes(name: str, links: dict[str, str], key=str) -> bool:
     """Whether the symlink `name` resolves outside the archive root. Resolves like the kernel,
     one component at a time, following the archive's links as it meets them, so a ".." after
     a link to "." climbs from where that link really points, not from its text."""
@@ -286,7 +315,7 @@ def _escapes(name: str, links: dict[str, str]) -> bool:
             at.pop()
             continue
         at.append(part)
-        target = links.get("/".join(at))
+        target = links.get(key("/".join(at)))
         if target is not None:
             hops += 1
             if hops > 40 or posixpath.isabs(target):   # a loop, or a link out by an absolute path
@@ -300,7 +329,7 @@ def _unpack(blob: Path, into: Path, artifact: Artifact) -> None:
     if tarfile.is_tarfile(blob):
         try:
             with tarfile.open(blob) as archive:
-                _check_members(archive, artifact)
+                _check_members(archive, artifact, fold=_folds_case(into.parent))
                 # "data" refuses absolute paths, links that leave `into` and device files, and keeps
                 # executable bits and in-tree symlinks, which is all a toolchain needs.
                 archive.extractall(into, filter="data")
@@ -319,7 +348,10 @@ def _fetch_git(artifact: Artifact, into: Path) -> None:
 
     def git(*args: str) -> None:
         try:
-            subprocess.run(["git", "-C", str(into), *args], check=True, capture_output=True, text=True, env=env)
+            # core.autocrlf=false: the same bytes on every machine (Git for Windows defaults to
+            # checking text out with CRLF).
+            subprocess.run(["git", "-C", str(into), "-c", "core.autocrlf=false", *args],
+                           check=True, capture_output=True, text=True, env=env)
         except subprocess.CalledProcessError as e:
             raise FetchError(f"{artifact.name}: git {' '.join(args)} failed: {e.stderr.strip()}") from None
         except OSError as e:
