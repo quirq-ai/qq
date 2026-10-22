@@ -64,7 +64,7 @@ jobs:
         shell: cmd
         env:
           QQ_HOME: ${{ runner.temp }}\qq
-          QQ_PYTHON: python   # setup-python's; without it qq.cmd uses `py -3.14`
+          QQ_PYTHON: python   # setup-python's; without it qq.cmd tries `py -3.14` first
         run: |
           call bin\qq.cmd --version > "%RUNNER_TEMP%\version.txt" || exit /b 1
           type "%RUNNER_TEMP%\version.txt"
@@ -81,6 +81,18 @@ jobs:
           QQ_HOME: ${{ runner.temp }}\qq-default
         run: |
           set QQ_PYTHON=
+          call bin\qq.cmd --version || exit /b 1
+      # The fallback: with no py launcher on PATH, qq.cmd takes setup-python's `python`.
+      - name: the launcher falls back to python on PATH (Windows cmd)
+        if: runner.os == 'Windows'
+        shell: cmd
+        env:
+          QQ_HOME: ${{ runner.temp }}\qq-fallback
+        run: |
+          set QQ_PYTHON=
+          for %%I in (python.exe) do set "pydir=%%~dp$PATH:I"
+          set "PATH=%pydir%;%SystemRoot%\System32"
+          where py >nul 2>nul && exit /b 1
           call bin\qq.cmd --version || exit /b 1
 
   # Limits: both runners share paths and user, and a red run fails before the compare, so

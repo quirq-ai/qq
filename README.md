@@ -36,8 +36,8 @@ guide: https://docs.quirq.dev/docs/qq. Toolchains are published for Linux x86_64
 and give `qq build` and `qq test` toolchains you installed yourself (`--toolchain python=ROOT`).
 
 On Windows, from cmd or PowerShell, put the checkout's `bin` on `PATH` the same way; `qq.cmd`
-there starts qq with `QQ_PYTHON`, else `py -3.14`; qq's hashed lock has no wheels for Python 3.15
-yet. `QQ_HOME` defaults to `%LOCALAPPDATA%\qq`.
+there starts qq with `QQ_PYTHON`, else the first of `py -3.14`, `python` and `python3` that is
+3.11.4 to 3.14; qq's hashed lock has no wheels for Python 3.15 yet. `QQ_HOME` defaults to `%LOCALAPPDATA%\qq`.
 `qq sync`, `qq fetch` and `qq sync project` run natively; the store links are directory
 junctions, which need neither administrator rights nor Developer Mode. Every other command says
 it does not run on Windows yet (`build`, `test`, `run` and a repo's own commands need `/bin/sh`;
